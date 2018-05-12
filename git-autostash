@@ -1,0 +1,104 @@
+#!/bin/bash
+set -e
+
+GIT_DIR="$(git rev-parse --git-dir)"
+
+TMP="$GIT_DIR/.git-stash.$$"
+TMPindex="$(git rev-parse --git-path index).stash.$$"
+
+ref_autostash=refs/autostash
+
+no_changes() {
+	git diff-index --quiet --cached HEAD --ignore-submodules -- "$@" &&
+	git diff-files --quiet --ignore-submodules -- "$@" &&
+	test -z "$(untracked_files "$@")"
+}
+
+untracked_files() {
+	git ls-files -o --exclude-standard -- "$@"
+}
+
+untracked_files_z() {
+	git ls-files -o -z --exclude-standard -- "$@"
+}
+
+list_autostash() {
+  git log --format="%gd: %gs" -g --first-parent -m "$@" "$ref_autostash" --
+}
+
+save_autostash() {
+  git update-index -q --refresh
+  if no_changes; then
+    exit 0
+  fi
+
+  # state of base commit
+  if b_commit="$(git rev-parse --verify HEAD)"; then
+    head="$(git rev-list --oneline -n 1 HEAD --)"
+  else
+    echo "Error: No initial commit" >&2
+    exit 1
+  fi
+
+  if branch="$(git symbolic-ref -q HEAD)"; then
+    branch="${branch#refs/heads/}"
+  else
+    branch="(no branch)"
+  fi
+
+  msg="$(printf '%s: %s' "$branch" "$head")"
+
+  # state of the index
+  i_tree="$(git write-tree)"
+  i_commit="$(printf 'index on %s\n' "$msg" |
+    git commit-tree $i_tree -p $b_commit)"
+
+  # untracked commits
+  u_commit="$(
+    untracked_files_z | (
+      GIT_INDEX_FILE="$TMPindex" &&
+      export GIT_INDEX_FILE &&
+      rm -f "$TMPindex" &&
+      git update-index -z --add --remove --stdin &&
+      u_tree="$(git write-tree)" &&
+      printf 'untracked files on %s\n' "$msg" | git commit-tree "$u_tree"  &&
+      rm -f "$TMPindex"
+  ) )"
+
+  # work tree
+  w_tree="$( (
+    git read-tree --index-output="$TMPindex" -m "$i_tree" &&
+    GIT_INDEX_FILE="$TMPindex" &&
+    export GIT_INDEX_FILE &&
+    git diff-index --name-only -z HEAD -- >"$TMP-stagenames" &&
+    git update-index -z --add --remove --stdin <"$TMP-stagenames" &&
+    git write-tree &&
+    rm -f "$TMPindex"
+  ) )"
+
+  # stash commit
+  date_format="--iso-8601=seconds"
+  stash_msg="$(printf '%s: [%s] %s' "$(date "$date_format")" "$branch" "$head" )"
+  w_commit="$(
+    printf '%s\n' "$stash_msg" |
+    git commit-tree "$w_tree" -p "$b_commit" -p "$i_commit" -p "$u_commit"
+  )"
+
+  git update-ref --create-reflog -m "$stash_msg" "$ref_autostash" "$w_commit"
+  echo "$w_commit"
+}
+
+case "$1" in
+  'list')
+    list_autostash "${@:2}"
+    ;;
+
+  'save'|'')
+    save_autostash "${@:2}"
+    ;;
+
+  *)
+    echo "Error: Unknown subcommand: $1" >&2
+    exit 1
+    ;;
+esac
