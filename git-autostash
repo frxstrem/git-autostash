@@ -26,6 +26,10 @@ list_autostash() {
   git log --format="%gd: %gs" -g --first-parent -m "$@" "$ref_autostash" --
 }
 
+expire_autostash() {
+  git reflog expire --expire='1 week ago' "$ref_autostash"
+}
+
 save_autostash() {
   git update-index -q --refresh
   if no_changes; then
@@ -77,12 +81,17 @@ save_autostash() {
   ) )"
 
   # stash commit
-  date_format="--iso-8601=seconds"
-  stash_msg="$(printf '%s: [%s] %s' "$(date "$date_format")" "$branch" "$head" )"
+  date="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  stash_msg="$(printf '%s: [%s] %s' "$date" "$branch" "$head" )"
   w_commit="$(
     printf '%s\n' "$stash_msg" |
     git commit-tree "$w_tree" -p "$b_commit" -p "$i_commit" -p "$u_commit"
   )"
+
+  # skip if identical to last autostash
+  if git show-ref -q "$ref_autostash" && git diff --quiet "$ref_autostash" "$w_commit"; then
+    exit 0
+  fi
 
   git update-ref --create-reflog -m "$stash_msg" "$ref_autostash" "$w_commit"
   echo "$w_commit"
@@ -91,6 +100,10 @@ save_autostash() {
 case "$1" in
   'list')
     list_autostash "${@:2}"
+    ;;
+
+  'expire')
+    expire_autostash "${@:2}"
     ;;
 
   'save'|'')
